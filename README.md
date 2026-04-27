@@ -3,7 +3,8 @@
 ## Symptom
 
 ```ts
-await sql`INSERT INTO bug (value) VALUES (${{ hello: 'world' }})`;
+const value = { hello: 'world' };
+await sql`INSERT INTO bug (value) VALUES (${value})`;
 ```
 
 On Bun 1.3.11+, this fails with:
