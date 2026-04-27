@@ -12,17 +12,26 @@ detail: Token "object" is invalid.
 This appears to be a regression introduced in `1.3.11` — see bisect below.
 The same code works in `1.3.10`.
 
-## Why this is filed separately from #28819
+## Relationship to #28819
 
-[oven-sh/bun#28819](https://github.com/oven-sh/bun/issues/28819) covers a
-related but distinct failure mode: passing a *pre-stringified* JSON value
-(`${JSON.stringify(x)}::json`) results in double-encoding. The proposed fix
-in #28821 explicitly preserves the existing behavior for non-string values
-("Non-string values (objects, arrays, numbers) still run through
-`jsonStringifyFast` as before"), so it would not address this case.
+[oven-sh/bun#28819](https://github.com/oven-sh/bun/issues/28819) reports
+double-encoding when binding a pre-stringified JSON value
+(`${JSON.stringify(x)}::json`). Running this repro across versions reveals
+the two bugs are linked: whatever change shipped in 1.3.11 fixed #28819
+but broke the raw-object path. **No released Bun version handles both
+paths correctly.**
 
-The repro script here exercises the raw-object path and confirms it fails
-on 1.3.11 onward.
+| Bun     | raw object/array bind   | `JSON.stringify + ::jsonb` workaround |
+| ------- | ----------------------- | ------------------------------------- |
+| 1.3.10  | works                   | silently double-encodes (stored as `jsonb_typeof=string`) |
+| 1.3.11  | fails (`[object Object]`) | works (`jsonb_typeof=object`)       |
+| 1.3.12  | fails                   | works                                 |
+| 1.3.13  | fails                   | works                                 |
+
+Reproduced under `prepare: false`. All runs against Postgres 16 (see
+`docker-compose.yml`) — note that this contradicts an earlier hypothesis
+that the double-encoding bug was Postgres-18-specific; it reproduces here
+on 16.
 
 ## Reproduce
 
@@ -33,19 +42,21 @@ bun run repro
 docker compose down -v
 ```
 
-## Bisect
+To run across Bun versions without changing your local install:
 
-| Bun     | raw JS object → jsonb |
-| ------- | --------------------- |
-| 1.3.10  | works                 |
-| 1.3.11  | fails                 |
-| 1.3.12  | (not tested)          |
-| 1.3.13  | fails                 |
+```sh
+docker compose up -d
+for ver in 1.3.10 1.3.11 1.3.12 1.3.13; do
+  echo "=== bun $ver ==="
+  docker run --rm \
+    -e DATABASE_URL='postgresql://repro:repro@host.docker.internal:5499/repro' \
+    -v "$(pwd)":/app -w /app \
+    oven/bun:$ver bun repro.ts
+done
+docker compose down -v
+```
 
-Reproduced under `prepare: false` (matches our application config). Will
-update if the same bisect holds with prepared statements enabled.
-
-## Actual output on Bun 1.3.11 (Postgres 16)
+## Sample output: Bun 1.3.11 (failure mode)
 
 ```
 FAIL  raw JS object, no inline cast
@@ -61,20 +72,25 @@ stored rows:
 ```
 
 The Postgres `detail` field on each failure is `Token "object" is invalid.`
-(or `Token "array" is invalid.`) — i.e. Bun is sending the literal string
-`[object Object]` / `[object Array]` on the wire. This means `String(value)`
-is being called on the parameter, regardless of the inline `::jsonb` cast.
+(or `Token "array" is invalid.`) — Bun is sending the literal string
+`[object Object]` / `[object Array]` on the wire. The inline `::jsonb` cast
+does not change this.
 
-## Expected output on Bun 1.3.10
+## Sample output: Bun 1.3.10
 
-All four cases pass. The first three were verified to succeed on 1.3.10 via
-a separate Docker rebuild against the same schema (see Bisect above).
+```
+OK    raw JS object, no inline cast
+OK    raw JS object, with ::jsonb cast
+OK    raw JS array, no inline cast
+OK    JSON.stringify + ::jsonb cast (workaround)
 
-## Note on Postgres version
+stored rows:
+  id=1  jsonb_typeof=object  value={"hello":"world"}
+  id=2  jsonb_typeof=object  value={"hello":"world"}
+  id=3  jsonb_typeof=array   value=[1,2,3]
+  id=4  jsonb_typeof=string  value="{\"hello\":\"world\"}"
+```
 
-#28819 reports double-encoding on Postgres 18.3 with the `JSON.stringify +
-::json` path. This repro is on Postgres 16, where that workaround stores
-correctly (`jsonb_typeof=object`). Either the double-encoding bug is
-Postgres-version-sensitive, or it manifests only with `::json` (not
-`::jsonb`). Not investigated further here — the focus is the raw-object
-failure mode, which is independent.
+Note that case 4 *appears* to "succeed" — no exception thrown — but the
+value is stored as a JSON string, not the intended object. This is the
+silent #28819 failure.
