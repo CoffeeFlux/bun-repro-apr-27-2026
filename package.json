@@ -1,0 +1,12 @@
+{
+  "name": "bun-jsonb-raw-object-repro",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "repro": "bun run repro.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  }
+}
